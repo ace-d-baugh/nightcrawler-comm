@@ -27,6 +27,7 @@ import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -140,6 +141,7 @@ private fun PixelStudio(vm: AutoCommViewModel, w: Int, h: Int, animation: Boolea
     var playing by remember { mutableStateOf(false) }
     var ghost by remember { mutableStateOf(true) }
     var media by remember { mutableStateOf<SourceMedia?>(null) }
+    var trimming by remember { mutableStateOf<SourceMedia?>(null) }
     var openMenu by remember { mutableStateOf(false) }
     var note by remember { mutableStateOf("") }
     val undo = remember { mutableStateListOf<Pair<Int, IntArray>>() }
@@ -147,8 +149,14 @@ private fun PixelStudio(vm: AutoCommViewModel, w: Int, h: Int, animation: Boolea
 
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
         if (uri != null) scope.launch {
-            val m = withContext(Dispatchers.IO) { Media.load(ctx, uri, if (animation) MAX_ANIM_FRAMES else 1) }
-            if (m == null) note = "Couldn't open that file" else media = m
+            note = "Loading…"
+            val m = withContext(Dispatchers.IO) { Media.load(ctx, uri, animation) }
+            note = when {
+                m == null -> "Couldn't open that file"
+                m.truncated -> "Only the first ${Media.MAX_DECODE_FRAMES} frames of that GIF were loaded"
+                else -> ""
+            }
+            if (m != null) { if (m.frames.size > MAX_ANIM_FRAMES) trimming = m else media = m }
         }
     }
 
@@ -303,12 +311,23 @@ private fun PixelStudio(vm: AutoCommViewModel, w: Int, h: Int, animation: Boolea
 
     if (picking) ColorPickerDialog(color, onPick = { color = it; picking = false; if (tool != Tool.FILL) tool = Tool.DRAW }, onDismiss = { picking = false })
 
+    trimming?.let { m ->
+        TrimDialog(m, onDismiss = { trimming = null }) { from, to ->
+            trimming = null
+            media = SourceMedia(m.frames.subList(from, to + 1), m.delays.subList(from, to + 1))
+        }
+    }
+
     media?.let { m ->
         FramingDialog(m, w, h, onDismiss = { media = null }) { framed ->
             resetHistory()
-            val list = framed.take(if (animation) MAX_ANIM_FRAMES else 1)
+            val n = if (animation) MAX_ANIM_FRAMES else 1
+            val list = framed.take(n)
             frames.clear(); frames.addAll(list)
-            delays.clear(); delays.addAll(List(list.size) { if (animation && m.frames.size > 1) m.delay.coerceIn(40, 1000) else 120 })
+            delays.clear()
+            delays.addAll(List(list.size) { i ->
+                if (animation && m.frames.size > 1) ((m.delays.getOrElse(i) { 120 } / 10f).roundToInt() * 10).coerceIn(40, 1000) else 120
+            })
             cur = 0
             media = null
         }
@@ -402,82 +421,167 @@ private fun floodFill(src: IntArray, w: Int, h: Int, x: Int, y: Int, c: Int): In
 }
 
 
-/** Pinch / drag the source inside the panel frame; only what's inside is kept. */
+/** GIFs longer than 40 frames: preview, play/pause, and pick a start/end (snaps to ≤ 40 frames). */
+@Composable
+private fun TrimDialog(media: SourceMedia, onDismiss: () -> Unit, onContinue: (Int, Int) -> Unit) {
+    val n = media.frames.size
+    var inIdx by remember { mutableIntStateOf(0) }
+    var outIdx by remember { mutableIntStateOf(min(n, MAX_ANIM_FRAMES) - 1) }
+    var shown by remember { mutableIntStateOf(0) }
+    var playing by remember { mutableStateOf(false) }
+
+    fun timeAt(i: Int): String = "%.2fs".format(media.delays.take(i).sum() / 1000f)
+
+    LaunchedEffect(playing, inIdx, outIdx) {
+        if (!playing) return@LaunchedEffect
+        if (shown !in inIdx..outIdx) shown = inIdx
+        while (true) {
+            kotlinx.coroutines.delay(media.delays.getOrElse(shown) { 100 }.toLong())
+            shown = if (shown >= outIdx) inIdx else shown + 1
+        }
+    }
+
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Surface(Modifier.fillMaxSize(), color = Bg) {
+            Column(Modifier.padding(16.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                TopBar("Trim Animation", onDismiss)
+                Text("This GIF has $n frames, but the panel supports up to $MAX_ANIM_FRAMES. Choose which part to import — the selection snaps to $MAX_ANIM_FRAMES frames automatically.", color = Color.Gray)
+                val bmp = media.frames[shown.coerceIn(0, n - 1)]
+                Box(
+                    Modifier.fillMaxWidth().heightIn(max = 360.dp).aspectRatio(bmp.width / bmp.height.toFloat())
+                        .clip(RoundedCornerShape(8.dp)).background(Color.Black).border(1.dp, Line, RoundedCornerShape(8.dp)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    androidx.compose.foundation.Image(
+                        bmp.asImageBitmap(), null, Modifier.fillMaxSize(),
+                        contentScale = androidx.compose.ui.layout.ContentScale.Fit
+                    )
+                }
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    FaButton(if (playing) Fa.Stop else Fa.Play, if (playing) "Pause" else "Play", selected = playing, size = 56) { playing = !playing }
+                    Text("Frame ${shown + 1} of $n", color = Color.White, fontWeight = FontWeight.Bold)
+                }
+                LabeledSlider("Start", inIdx.toFloat(), 0f..(n - 1).toFloat(), { "Frame ${it.roundToInt() + 1} · ${timeAt(it.roundToInt())}" }) {
+                    val i = it.roundToInt()
+                    inIdx = i
+                    if (outIdx < i) outIdx = i
+                    if (outIdx - i + 1 > MAX_ANIM_FRAMES) outIdx = i + MAX_ANIM_FRAMES - 1
+                    playing = false; shown = i
+                }
+                LabeledSlider("End", outIdx.toFloat(), 0f..(n - 1).toFloat(), { "Frame ${it.roundToInt() + 1} · ${timeAt(it.roundToInt() + 1)}" }) {
+                    val o = it.roundToInt()
+                    outIdx = o
+                    if (inIdx > o) inIdx = o
+                    if (o - inIdx + 1 > MAX_ANIM_FRAMES) inIdx = o - MAX_ANIM_FRAMES + 1
+                    playing = false; shown = o
+                }
+                Text("Selected ${outIdx - inIdx + 1} of $n frames · ${timeAt(inIdx)} – ${timeAt(outIdx + 1)}", color = Green)
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Spacer(Modifier.weight(1f))
+                    TextButton(onClick = onDismiss) { Text("Cancel") }
+                    Button(onClick = { playing = false; onContinue(inIdx, outIdx) }) { Text("Continue") }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Position & Fit: drag to move, pinch / slider to zoom (10–400 %, 100 % = fills the frame),
+ * twist / slider / ±90° to rotate. Only what's inside the frame is kept; applies to every frame.
+ */
 @Composable
 private fun FramingDialog(media: SourceMedia, w: Int, h: Int, onDismiss: () -> Unit, onApply: (List<IntArray>) -> Unit) {
     val src = media.frames.first()
     val sw = src.width.toFloat()
     val sh = src.height.toFloat()
-    val fitScale = min(w / sw, h / sh)
-    val fillScale = max(w / sw, h / sh)
-    var scale by remember { mutableFloatStateOf(fitScale) }
-    var tx by remember { mutableFloatStateOf((w - sw * fitScale) / 2f) }
-    var ty by remember { mutableFloatStateOf((h - sh * fitScale) / 2f) }
+    val cover = max(w / sw, h / sh)
+    var zoomPct by remember { mutableFloatStateOf(100f) }
+    var rot by remember { mutableFloatStateOf(0f) }
+    var cx by remember { mutableFloatStateOf(w / 2f) }
+    var cy by remember { mutableFloatStateOf(h / 2f) }
     var box by remember { mutableStateOf(IntSize.Zero) }
 
-    fun center(s: Float) { scale = s; tx = (w - sw * s) / 2f; ty = (h - sh * s) / 2f }
+    fun norm(d: Float): Float { var x = (d + 180f) % 360f; if (x < 0) x += 360f; return x - 180f }
+    fun reset() { zoomPct = 100f; rot = 0f; cx = w / 2f; cy = h / 2f }
+    fun zoom() = cover * zoomPct / 100f
 
     // frame geometry in screen px: (viewScale, left, top)
     fun geom(): Triple<Float, Float, Float> {
         val bw = box.width.toFloat(); val bh = box.height.toFloat()
-        val fw = min(bw * 0.86f, bh * 0.86f * w / h)
+        val fw = min(bw * 0.8f, bh * 0.8f * w / h)
         val vs = fw / w
         return Triple(vs, (bw - fw) / 2f, (bh - h * vs) / 2f)
     }
 
-    val preview = remember(scale, tx, ty) {
-        Frames(w, h, listOf(Media.frame(src, w, h, scale, tx, ty)), listOf(100))
+    val preview = remember(zoomPct, rot, cx, cy) {
+        Frames(w, h, listOf(Media.frame(src, w, h, cx, cy, zoom(), rot)), listOf(100))
     }
     val paint = remember { Paint(Paint.FILTER_BITMAP_FLAG) }
 
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Surface(Modifier.fillMaxSize(), color = Bg) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                TopBar("Frame it", onDismiss)
+                TopBar("Position & Fit", onDismiss)
                 Text(
-                    "Pinch to zoom, drag to move. Only what's inside the frame is kept" +
-                        if (media.frames.size > 1) " — applied to all ${media.frames.size} frames." else ".",
+                    if (media.frames.size > 1) "Drag, zoom and rotate apply to all ${media.frames.size} frames together."
+                    else "Drag the image to move it. It doesn't have to fill the frame — zoom out to leave empty space.",
                     color = Color.Gray
                 )
                 Box(
-                    Modifier.fillMaxWidth().weight(1f).clipToBounds().background(Color(0xFF111111))
+                    Modifier.fillMaxWidth().weight(1f).clipToBounds().background(Color(0xFF06070A))
                         .onSizeChanged { box = it }
                         .pointerInput(Unit) {
-                            detectTransformGestures { centroid, pan, zoom, _ ->
+                            detectTransformGestures { centroid, pan, gZoom, gRot ->
                                 val (vs, fl, ft) = geom()
                                 if (vs <= 0f) return@detectTransformGestures
-                                val cx = (centroid.x - fl) / vs
-                                val cy = (centroid.y - ft) / vs
-                                val ns = (scale * zoom).coerceIn(fitScale / 8f, fillScale * 20f)
-                                val z = ns / scale
-                                tx = cx - (cx - tx) * z + pan.x / vs
-                                ty = cy - (cy - ty) * z + pan.y / vs
-                                scale = ns
+                                val px = (centroid.x - fl) / vs
+                                val py = (centroid.y - ft) / vs
+                                val nz = (zoomPct * gZoom).coerceIn(10f, 400f)
+                                val z = nz / zoomPct
+                                cx = px + (cx - px) * z + pan.x / vs
+                                cy = py + (cy - py) * z + pan.y / vs
+                                zoomPct = nz
+                                rot = norm(rot + gRot)
                             }
                         }
                 ) {
                     Canvas(Modifier.fillMaxSize()) {
                         val (vs, fl, ft) = geom()
                         if (vs <= 0f) return@Canvas
-                        val m = Matrix().apply { setScale(scale * vs, scale * vs); postTranslate(fl + tx * vs, ft + ty * vs) }
+                        val m = Matrix().apply {
+                            setTranslate(-sw / 2f, -sh / 2f)
+                            postScale(zoom() * vs, zoom() * vs)
+                            postRotate(rot)
+                            postTranslate(fl + cx * vs, ft + cy * vs)
+                        }
                         drawContext.canvas.nativeCanvas.drawBitmap(src, m, paint)
                         val fw = w * vs; val fh = h * vs
-                        val shade = Color.Black.copy(alpha = 0.65f)
+                        val shade = Color(0xFF06070A).copy(alpha = 0.72f)
                         drawRect(shade, Offset.Zero, Size(size.width, ft))
                         drawRect(shade, Offset(0f, ft + fh), Size(size.width, size.height - ft - fh))
                         drawRect(shade, Offset(0f, ft), Size(fl, fh))
                         drawRect(shade, Offset(fl + fw, ft), Size(size.width - fl - fw, fh))
-                        drawRect(Color.White, Offset(fl, ft), Size(fw, fh), style = Stroke(3f))
+                        drawRect(Color(0xFF3FA9FF), Offset(fl, ft), Size(fw, fh), style = Stroke(3f))
                     }
+                }
+                LabeledSlider("Zoom", zoomPct, 10f..400f, { "${it.roundToInt()}%" }) { zoomPct = it.roundToInt().toFloat() }
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    FaButton(Fa.Undo, "Rotate left 90°", size = 44) { rot = norm(rot - 90f) }
+                    Box(Modifier.weight(1f)) {
+                        LabeledSlider("Rotate", rot, -180f..180f, { "${it.roundToInt()}°" }) { rot = it.roundToInt().toFloat() }
+                    }
+                    FaButton(Fa.Redo, "Rotate right 90°", size = 44) { rot = norm(rot + 90f) }
                 }
                 Text("Panel preview", color = Color.Gray)
                 LedPreview(preview, w, h)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = { center(fitScale) }) { Text("Fit") }
-                    OutlinedButton(onClick = { center(fillScale) }) { Text("Fill") }
+                    OutlinedButton(onClick = { reset() }) { Text("Reset") }
                     Spacer(Modifier.weight(1f))
                     TextButton(onClick = onDismiss) { Text("Cancel") }
-                    Button(onClick = { onApply(media.frames.map { Media.frame(it, w, h, scale, tx, ty) }) }) { Text("Apply") }
+                    Button(onClick = { onApply(media.frames.map { Media.frame(it, w, h, cx, cy, zoom(), rot) }) }) {
+                        Text(if (media.frames.size > 1) "Apply to ${media.frames.size} Frames" else "Apply")
+                    }
                 }
             }
         }

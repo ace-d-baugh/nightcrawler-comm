@@ -5,7 +5,6 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.ImageDecoder
 import android.graphics.Matrix
-import android.graphics.Movie
 import android.graphics.Paint
 import android.net.Uri
 import android.util.Base64
@@ -88,56 +87,71 @@ class MessageStore(ctx: Context) {
     }
 }
 
-/** Source media picked for framing: one bitmap (image) or several (GIF), with per-frame delay. */
-class SourceMedia(val frames: List<Bitmap>, val delay: Int)
+/** Source media picked for framing: one bitmap (image) or several (GIF) with per-frame delays (ms). */
+class SourceMedia(val frames: List<Bitmap>, val delays: List<Int>, val truncated: Boolean = false)
 
 object Media {
-    private const val MAX_SRC = 1024
+    private const val MAX_SRC = 1024      // still images: longest side
+    private const val MAX_GIF_SIDE = 320  // GIF frames are kept small to save memory
+    const val MAX_DECODE_FRAMES = 400
 
-    fun load(ctx: Context, uri: Uri, maxFrames: Int): SourceMedia? = runCatching {
+    fun load(ctx: Context, uri: Uri, animated: Boolean): SourceMedia? = runCatching {
         val bytes = ctx.contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: return null
         val isGif = bytes.size > 3 && bytes[0] == 'G'.code.toByte() && bytes[1] == 'I'.code.toByte() && bytes[2] == 'F'.code.toByte()
-        if (isGif && maxFrames > 1) decodeGif(bytes, maxFrames)?.let { return it }
+        if (isGif && animated) decodeGif(bytes)?.takeIf { it.frames.isNotEmpty() }?.let { return it }
         val src = ImageDecoder.createSource(java.nio.ByteBuffer.wrap(bytes))
         val bmp = ImageDecoder.decodeBitmap(src) { dec, info, _ ->
             dec.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
             val s = min(1f, MAX_SRC / max(info.size.width, info.size.height).toFloat())
             if (s < 1f) dec.setTargetSize((info.size.width * s).toInt().coerceAtLeast(1), (info.size.height * s).toInt().coerceAtLeast(1))
         }
-        SourceMedia(listOf(bmp), 100)
+        SourceMedia(listOf(bmp), listOf(1000))
     }.getOrNull()
 
-    @Suppress("DEPRECATION")
-    private fun decodeGif(bytes: ByteArray, maxFrames: Int): SourceMedia? {
-        val movie = Movie.decodeByteArray(bytes, 0, bytes.size) ?: return null
-        val mw = movie.width(); val mh = movie.height()
-        if (mw <= 0 || mh <= 0) return null
-        val dur = movie.duration()
-        if (dur <= 0) return null
-        val n = (dur / 80).coerceIn(1, maxFrames)
-        val step = max(20, dur / n)
-        val frames = (0 until n).map { k ->
-            movie.setTime(k * step)
-            Bitmap.createBitmap(mw, mh, Bitmap.Config.ARGB_8888).also { movie.draw(Canvas(it), 0f, 0f) }
+    private fun decodeGif(bytes: ByteArray): SourceMedia? {
+        if (bytes.size < 13) return null
+        val gw = (bytes[6].toInt() and 0xFF) or ((bytes[7].toInt() and 0xFF) shl 8)
+        val gh = (bytes[8].toInt() and 0xFF) or ((bytes[9].toInt() and 0xFF) shl 8)
+        if (gw <= 0 || gh <= 0) return null
+        val s = min(1f, MAX_GIF_SIDE / max(gw, gh).toFloat())
+        val tw = max(1, (gw * s).toInt())
+        val th = max(1, (gh * s).toInt())
+        val full = Bitmap.createBitmap(gw, gh, Bitmap.Config.ARGB_8888)
+        val frames = ArrayList<Bitmap>()
+        val delays = ArrayList<Int>()
+        val info = GifDecoder.decode(bytes, MAX_DECODE_FRAMES + 1) { canvas, delay ->
+            if (frames.size < MAX_DECODE_FRAMES) {
+                full.setPixels(canvas, 0, gw, 0, 0, gw, gh)
+                frames += if (s < 1f) Bitmap.createScaledBitmap(full, tw, th, true) else full.copy(Bitmap.Config.ARGB_8888, false)
+                delays += delay
+            }
         }
-        return SourceMedia(frames, step)
+        full.recycle()
+        if (info == null) return null
+        return SourceMedia(frames, delays, truncated = info.third > MAX_DECODE_FRAMES)
     }
 
     /**
-     * Draw [src] into a w×h panel at [scale] (panel px per source px) and offset (tx, ty) in panel px.
-     * Only what lands inside the frame is kept.
+     * Draw [src] into a w×h panel: centered at (cx, cy) in panel px, scaled by [zoom]
+     * (panel px per source px) and rotated [deg]. Only what lands inside the frame is kept;
+     * near-black counts as off.
      */
-    fun frame(src: Bitmap, w: Int, h: Int, scale: Float, tx: Float, ty: Float): IntArray {
+    fun frame(src: Bitmap, w: Int, h: Int, cx: Float, cy: Float, zoom: Float, deg: Float): IntArray {
         val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-        val m = Matrix().apply { setScale(scale, scale); postTranslate(tx, ty) }
+        val m = Matrix().apply {
+            setTranslate(-src.width / 2f, -src.height / 2f)
+            postScale(zoom, zoom)
+            postRotate(deg)
+            postTranslate(cx, cy)
+        }
         Canvas(out).drawBitmap(src, m, Paint(Paint.FILTER_BITMAP_FLAG))
         val px = IntArray(w * h)
         out.getPixels(px, 0, w, 0, 0, w, h)
         out.recycle()
         for (i in px.indices) {
             val c = px[i]
-            val a = c ushr 24
-            px[i] = if (a < 100 || (c and 0xFFFFFF) == 0) 0 else c or (0xFF shl 24)
+            val r = c shr 16 and 0xFF; val g = c shr 8 and 0xFF; val b = c and 0xFF
+            px[i] = if ((c ushr 24) < 100 || (r < 8 && g < 8 && b < 8)) 0 else c or (0xFF shl 24)
         }
         return px
     }

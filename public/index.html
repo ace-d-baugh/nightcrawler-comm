@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1">
+<title>Nightcrawler Design Studio</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="topbar">
+  <h1>Design Studio <span class="subtitle">64&times;16 LED Panel</span></h1>
+  <div class="tabs" role="tablist">
+    <button class="tab active" data-mode="image" role="tab" aria-selected="true">Graphics</button>
+    <button class="tab" data-mode="animation" role="tab" aria-selected="false">Animation</button>
+  </div>
+</header>
+
+<section class="projectbar">
+  <input id="nameInput" type="text" value="My Design" maxlength="40" aria-label="Design name">
+  <div class="projectbar-actions">
+    <button id="newBtn" class="btn" title="Clear and start a new design"><span class="icon" data-icon="rotate"></span>New</button>
+    <button id="openBtn" class="btn" title="Open a saved design"><span class="icon" data-icon="folderOpen"></span>Open</button>
+    <button id="uploadBtn" class="btn" title="Upload an image and position it on the grid"><span class="icon" data-icon="upload"></span>Upload Image</button>
+    <button id="saveBtn" class="btn" title="Save this design in the browser"><span class="icon" data-icon="floppyDisk"></span>Save</button>
+    <button id="exportJsonBtn" class="btn" title="Download a backup project file (.json)"><span class="icon" data-icon="copy"></span>Backup</button>
+    <button id="exportGifBtn" class="btn btn-primary" title="Download as GIF for the Android app"><span class="icon" data-icon="paperPlane"></span>Download GIF</button>
+  </div>
+</section>
+
+<main class="workspace">
+  <div class="toolbar" role="toolbar" aria-label="Drawing tools">
+    <button class="tool active" data-tool="pencil" title="Draw"><span class="icon" data-icon="pencil"></span></button>
+    <button class="tool" data-tool="eraser" title="Erase"><span class="icon" data-icon="eraser"></span></button>
+    <button class="tool" data-tool="fill" title="Fill"><span class="icon" data-icon="fillDrip"></span></button>
+    <button class="tool" data-tool="eyedropper" title="Pick color from grid"><span class="icon" data-icon="eyeDropper"></span></button>
+    <div class="toolbar-sep"></div>
+    <button id="undoBtn" class="tool" title="Undo"><span class="icon" data-icon="undo"></span></button>
+    <button id="redoBtn" class="tool" title="Redo"><span class="icon" data-icon="redo"></span></button>
+    <button id="clearBtn" class="tool" title="Clear grid"><span class="icon" data-icon="circleXmark"></span></button>
+    <div class="toolbar-sep"></div>
+    <label class="swatch-wrap" title="Current color">
+      <input id="colorInput" type="color" value="#ff2d2d">
+      <span id="swatch" class="swatch"></span>
+    </label>
+  </div>
+
+  <div class="canvas-area">
+    <canvas id="panel" width="768" height="192" aria-label="LED panel editor"></canvas>
+  </div>
+</main>
+
+<section id="animBar" class="animbar hidden">
+  <div class="animbar-row">
+    <button id="playBtn" class="btn" title="Play animation preview"><span class="icon" data-icon="play"></span><span id="playLabel">Play</span></button>
+    <label class="ghostToggle">
+      <input id="ghostToggle" type="checkbox">
+      <span class="icon" data-icon="ghost"></span>
+      Onion skin
+    </label>
+    <label class="speedLabel">
+      Speed
+      <input id="speedInput" type="number" min="20" max="5000" step="10" value="120">
+      ms/frame
+    </label>
+    <span id="frameLabel" class="frameLabel">Frame 1 of 1</span>
+  </div>
+  <div class="frames-strip" id="framesStrip"></div>
+</section>
+
+<dialog id="openDialog">
+  <h2>Open a saved design</h2>
+  <ul id="savedList" class="saved-list"></ul>
+  <div class="dialog-actions">
+    <button id="importFileBtn" class="btn">Import project file&hellip;</button>
+    <input id="importFileInput" type="file" accept="application/json" hidden>
+    <button id="closeDialogBtn" class="btn">Close</button>
+  </div>
+</dialog>
+
+<dialog id="trimDialog" class="crop-dialog">
+  <h2>Trim Animation</h2>
+  <p class="crop-hint">This GIF has <strong id="trimTotalFrames">0</strong> frames, but the panel only supports up to <strong>40</strong>. Choose which part to import &mdash; the window below snaps to 40 frames automatically.</p>
+  <div class="crop-canvas-wrap trim-preview-wrap">
+    <canvas id="trimPreviewCanvas" width="480" height="200" aria-label="Trimmed animation preview"></canvas>
+    <button id="trimPlayBtn" class="trim-play-btn" title="Play/pause preview" type="button">
+      <span class="icon" data-icon="play"></span>
+    </button>
+  </div>
+  <p class="trim-preview-label">Previewing frame <span id="trimPreviewFrameNum">1</span> of <span id="trimPreviewFrameTotal">0</span></p>
+  <div class="crop-controls">
+    <label class="crop-row">
+      <span class="trim-label">In</span>
+      <input id="trimInInput" type="range" min="0" max="0" value="0" step="1">
+      <span id="trimInVal" class="crop-val trim-val">0.00s</span>
+    </label>
+    <label class="crop-row">
+      <span class="trim-label">Out</span>
+      <input id="trimOutInput" type="range" min="0" max="0" value="0" step="1">
+      <span id="trimOutVal" class="crop-val trim-val">0.00s</span>
+    </label>
+  </div>
+  <p id="trimCountLabel" class="crop-hint trim-count">Selected 0 of 0 frames</p>
+  <div class="dialog-actions">
+    <button id="trimCancelBtn" class="btn">Cancel</button>
+    <button id="trimContinueBtn" class="btn btn-primary">Continue</button>
+  </div>
+</dialog>
+
+<dialog id="cropDialog" class="crop-dialog">
+  <h2>Position &amp; Fit</h2>
+  <div class="crop-canvas-wrap">
+    <canvas id="cropCanvas" width="960" height="400" aria-label="Image placement preview"></canvas>
+  </div>
+  <p id="cropHint" class="crop-hint">Drag the image to move it. It doesn't have to fill the frame &mdash; zoom out to leave empty space.</p>
+  <div class="crop-controls">
+    <label class="crop-row">
+      <span class="icon" data-icon="magnifyingGlass"></span>
+      <input id="cropZoom" type="range" min="10" max="400" value="100" step="1">
+      <span id="cropZoomVal" class="crop-val">100%</span>
+    </label>
+    <label class="crop-row">
+      <span class="icon" data-icon="rotate"></span>
+      <input id="cropRotate" type="range" min="-180" max="180" value="0" step="1">
+      <span id="cropRotateVal" class="crop-val">0&deg;</span>
+    </label>
+    <div class="crop-row crop-row-buttons">
+      <button id="cropRotateLeftBtn" class="btn" title="Rotate 90&deg; left"><span class="icon icon-flip" data-icon="rotate"></span>90&deg;</button>
+      <button id="cropRotateRightBtn" class="btn" title="Rotate 90&deg; right"><span class="icon" data-icon="rotate"></span>90&deg;</button>
+      <button id="cropResetBtn" class="btn">Reset</button>
+    </div>
+  </div>
+  <div class="dialog-actions">
+    <button id="cropCancelBtn" class="btn">Cancel</button>
+    <button id="cropApplyBtn" class="btn btn-primary">Apply</button>
+  </div>
+</dialog>
+
+<input id="uploadFileInput" type="file" accept="image/*" hidden>
+
+<footer class="statusbar">
+  <span id="statusText">Ready.</span>
+</footer>
+
+<script src="vendor/gif.js"></script>
+<script src="vendor/omggif.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

@@ -35,9 +35,14 @@ fun TopBar(title: String, onBack: () -> Unit, actions: @Composable RowScope.() -
 }
 
 @Composable
-private fun Page(title: String, onBack: () -> Unit, actions: @Composable RowScope.() -> Unit = {}, content: @Composable ColumnScope.() -> Unit) {
+private fun Page(
+    title: String, onBack: () -> Unit, actions: @Composable RowScope.() -> Unit = {},
+    header: (@Composable () -> Unit)? = null,
+    content: @Composable ColumnScope.() -> Unit,
+) {
     Column(Modifier.fillMaxSize().background(Bg).padding(16.dp)) {
         TopBar(title, onBack, actions)
+        header?.let { it(); Spacer(Modifier.height(12.dp)) }
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             content()
             Spacer(Modifier.height(24.dp))
@@ -51,7 +56,7 @@ enum class SettingsPage(val title: String, val subtitle: String) {
     PANELS("Panels", "Find, rename, connect or forget the front and rear panels"),
     VOICE("Voice Message Display", "How voice messages look on the panels"),
     STICKERS("Bumper Stickers", "What each panel shows when nothing else is on it"),
-    QUICK("Quick Responses", "The 9 buttons on the main screen"),
+    QUICK("Quick Responses", "$QUICK_SETS sets of $SET_SLOTS buttons on the main screen"),
     SAVED("Saved Messages", "All your saved text, images and animations"),
     STUDIO("Design Studio", "Create text, image and animation messages"),
 }
@@ -238,11 +243,20 @@ fun QuickPage(vm: AutoCommViewModel, onEdit: (Int, Message) -> Unit, onBack: () 
     val messages by vm.messages.collectAsStateWithLifecycle()
     var editing by remember { mutableStateOf(false) }
     var switching by remember { mutableStateOf<Int?>(null) }
+    var set by remember { mutableIntStateOf(0) }
 
     Page("Quick Responses", onBack, actions = {
         FaButton(Fa.Pencil, "Edit", selected = editing) { editing = !editing }
+    }, header = {
+        TabRow(selectedTabIndex = set, containerColor = Bg) {
+            (0 until QUICK_SETS).forEach { s ->
+                Tab(selected = set == s, onClick = { set = s }, text = { Text(setName(s), fontSize = 17.sp) })
+            }
+        }
     }) {
-        quick.forEachIndexed { i, id ->
+        (0 until SET_SLOTS).forEach { i ->
+            val g = set * SET_SLOTS + i
+            val id = quick.getOrNull(g)
             val m = messages.firstOrNull { it.id == id }
             Column(
                 Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(TileBg).border(1.dp, Line, RoundedCornerShape(12.dp)).padding(14.dp),
@@ -259,11 +273,11 @@ fun QuickPage(vm: AutoCommViewModel, onEdit: (Int, Message) -> Unit, onBack: () 
                     if (m != null) Text(m.kind.label, color = Color.Gray, fontSize = 13.sp)
                 }
                 if (editing) Row(Modifier.padding(start = 42.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    FaButton(Fa.AngleUp, "Move up", enabled = i > 0) { vm.moveQuick(i, i - 1) }
-                    FaButton(Fa.Pencil, "Edit", enabled = m != null) { m?.let { onEdit(i, it) } }
-                    FaButton(Fa.Rotate, "Switch") { switching = i }
-                    FaButton(Fa.TrashCan, "Remove", enabled = m != null) { vm.removeQuick(i) }
-                    FaButton(Fa.AngleDown, "Move down", enabled = i < QUICK_SLOTS - 1) { vm.moveQuick(i, i + 1) }
+                    FaButton(Fa.AngleUp, "Move up", enabled = i > 0) { vm.moveQuick(g, g - 1) }
+                    FaButton(Fa.Pencil, "Edit", enabled = m != null) { m?.let { onEdit(g, it) } }
+                    FaButton(Fa.Rotate, "Switch") { switching = g }
+                    FaButton(Fa.TrashCan, "Remove", enabled = m != null) { vm.removeQuick(g) }
+                    FaButton(Fa.AngleDown, "Move down", enabled = i < SET_SLOTS - 1) { vm.moveQuick(g, g + 1) }
                 }
             }
         }

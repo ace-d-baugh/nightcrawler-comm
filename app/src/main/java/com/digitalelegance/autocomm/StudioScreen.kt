@@ -156,7 +156,7 @@ private fun PixelStudio(vm: AutoCommViewModel, w: Int, h: Int, animation: Boolea
                 m.truncated -> "Only the first ${Media.MAX_DECODE_FRAMES} frames of that GIF were loaded"
                 else -> ""
             }
-            if (m != null) { if (m.frames.size > MAX_ANIM_FRAMES) trimming = m else media = m }
+            if (m != null) { if (animation && m.frames.size > 1) trimming = m else media = m }
         }
     }
 
@@ -287,7 +287,7 @@ private fun PixelStudio(vm: AutoCommViewModel, w: Int, h: Int, animation: Boolea
                             .border(if (sel) 4.dp else 1.dp, if (sel) Color.White else Line)
                             .clickable { cur = i; playing = false }
                     )
-                    val full = frames.size >= MAX_ANIM_FRAMES
+                    val full = false
                     FaButton(Fa.Plus, "Add frame below", enabled = !full, size = 44) {
                         frames.add(i + 1, IntArray(w * h)); delays.add(i + 1, delays[i]); cur = i + 1; resetHistory()
                     }
@@ -321,7 +321,7 @@ private fun PixelStudio(vm: AutoCommViewModel, w: Int, h: Int, animation: Boolea
     media?.let { m ->
         FramingDialog(m, w, h, onDismiss = { media = null }) { framed ->
             resetHistory()
-            val n = if (animation) MAX_ANIM_FRAMES else 1
+            val n = if (animation) Int.MAX_VALUE else 1
             val list = framed.take(n)
             frames.clear(); frames.addAll(list)
             delays.clear()
@@ -421,12 +421,12 @@ private fun floodFill(src: IntArray, w: Int, h: Int, x: Int, y: Int, c: Int): In
 }
 
 
-/** GIFs longer than 40 frames: preview, play/pause, and pick a start/end (snaps to ≤ 40 frames). */
+/** Animated GIF import: preview, play/pause, and optionally clip a start/end. */
 @Composable
 private fun TrimDialog(media: SourceMedia, onDismiss: () -> Unit, onContinue: (Int, Int) -> Unit) {
     val n = media.frames.size
     var inIdx by remember { mutableIntStateOf(0) }
-    var outIdx by remember { mutableIntStateOf(min(n, MAX_ANIM_FRAMES) - 1) }
+    var outIdx by remember { mutableIntStateOf(n - 1) }
     var shown by remember { mutableIntStateOf(0) }
     var playing by remember { mutableStateOf(false) }
 
@@ -445,7 +445,7 @@ private fun TrimDialog(media: SourceMedia, onDismiss: () -> Unit, onContinue: (I
         Surface(Modifier.fillMaxSize(), color = Bg) {
             Column(Modifier.padding(16.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(14.dp)) {
                 TopBar("Trim Animation", onDismiss)
-                Text("This GIF has $n frames, but the panel supports up to $MAX_ANIM_FRAMES. Choose which part to import — the selection snaps to $MAX_ANIM_FRAMES frames automatically.", color = Color.Gray)
+                Text("This GIF has $n frames. Keep all of it, or move Start / End to import only part.", color = Color.Gray)
                 val bmp = media.frames[shown.coerceIn(0, n - 1)]
                 Box(
                     Modifier.fillMaxWidth().heightIn(max = 360.dp).aspectRatio(bmp.width / bmp.height.toFloat())
@@ -465,14 +465,12 @@ private fun TrimDialog(media: SourceMedia, onDismiss: () -> Unit, onContinue: (I
                     val i = it.roundToInt()
                     inIdx = i
                     if (outIdx < i) outIdx = i
-                    if (outIdx - i + 1 > MAX_ANIM_FRAMES) outIdx = i + MAX_ANIM_FRAMES - 1
                     playing = false; shown = i
                 }
                 LabeledSlider("End", outIdx.toFloat(), 0f..(n - 1).toFloat(), { "Frame ${it.roundToInt() + 1} · ${timeAt(it.roundToInt() + 1)}" }) {
                     val o = it.roundToInt()
                     outIdx = o
                     if (inIdx > o) inIdx = o
-                    if (o - inIdx + 1 > MAX_ANIM_FRAMES) inIdx = o - MAX_ANIM_FRAMES + 1
                     playing = false; shown = o
                 }
                 Text("Selected ${outIdx - inIdx + 1} of $n frames · ${timeAt(inIdx)} – ${timeAt(outIdx + 1)}", color = Green)

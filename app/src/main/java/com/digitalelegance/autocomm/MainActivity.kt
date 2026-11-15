@@ -18,6 +18,8 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -45,6 +47,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import kotlinx.coroutines.launch
 import com.digitalelegance.autocomm.ble.PanelConnection
 
 class MainActivity : ComponentActivity() {
@@ -63,6 +66,8 @@ private fun requiredPermissions(): Array<String> =
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S)
         arrayOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
     else arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
+
+private const val PAGER_PAGES = QUICK_SETS * 1000
 
 private enum class Screen { MAIN, SETTINGS, PANELS, VOICE, STICKERS, QUICK, SAVED, STUDIO }
 
@@ -147,6 +152,9 @@ private fun MainScreen(vm: AutoCommViewModel, onFind: (String) -> Unit, onRename
 
     var target by remember { mutableStateOf(Target.BOTH) }
     var showVoice by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    // "Infinite" carousel: many pages, starting on a multiple of QUICK_SETS so page % 4 == 0 is Set ★
+    val pager = rememberPagerState(initialPage = PAGER_PAGES / 2) { PAGER_PAGES }
 
     val micPerm = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
         if (ok) showVoice = true
@@ -179,31 +187,63 @@ private fun MainScreen(vm: AutoCommViewModel, onFind: (String) -> Unit, onRename
 
         TargetSelector(target, { target = it })
 
-        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            val dirIcons = listOf(Fa.ArrowLeft, Icons.Filled.UTurnLeft, Fa.ArrowRight)
-            Row(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                vm.directions.forEachIndexed { i, m ->
+        BoxWithConstraints(Modifier.weight(1f)) {
+        val gap = 10.dp
+        val tileH = (maxHeight - gap * 4) / 5 // every button row the same height
+        Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(gap)) {
+            // Fixed top row: Left, U-Turn, Hazard, Right
+            Row(Modifier.height(tileH), horizontalArrangement = Arrangement.spacedBy(gap)) {
+                vm.directions.forEach { m ->
                     val id = m.id
-                    val t = if (i == 1) Target.BOTH else target
+                    val t = if (m.id == "dir1" || m.id == "dir3") Target.BOTH else target
+                    val icon = when (m.id) {
+                        "dir0" -> Fa.ArrowLeft
+                        "dir1" -> Icons.Filled.UTurnLeft
+                        "dir3" -> Fa.TriangleExclamation
+                        else -> Fa.ArrowRight
+                    }
+                    val big = m.id == "dir1"
                     Tile(active == id, rgb(m.style.color), true, { vm.toggle(id, m, t) }, Modifier.weight(1f)) {
-                        Icon(dirIcons[i], null, Modifier.size(if (i == 1) 56.dp else 44.dp), tint = if (active == id) rgb(m.style.color) else Color.White)
+                        Icon(icon, m.name, Modifier.size(if (big) 52.dp else 40.dp), tint = if (active == id) rgb(m.style.color) else Color.White)
                     }
                 }
             }
-            quick.chunked(3).forEachIndexed { r, row ->
-                Row(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    row.forEachIndexed { c, qid ->
-                        val idx = r * 3 + c
-                        val key = "q$idx"
-                        val m = messages.firstOrNull { it.id == qid }
-                        val accent = if (m == null || !m.isText) Color.White else rgb(m.style.color)
-                        Tile(active == key, accent, m != null, { vm.toggleQuick(idx) }, Modifier.weight(1f)) {
-                            MessageFace(m, Modifier.fillMaxSize().padding(6.dp))
-                            if (m != null) TargetDot(m.target, Modifier.align(Alignment.TopEnd).padding(8.dp))
+            // Quick-response sets: swipe (wraps around) or tap a set button. Opens on Set ★.
+            HorizontalPager(state = pager, modifier = Modifier.fillMaxWidth().height(tileH * 3 + gap * 2), pageSpacing = 16.dp) { page ->
+                val set = page % QUICK_SETS
+                Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(gap)) {
+                    (0 until SET_SLOTS / 4).forEach { r ->
+                        Row(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(gap)) {
+                            (0 until 4).forEach { c ->
+                                val idx = set * SET_SLOTS + r * 4 + c
+                                val key = "q$idx"
+                                val m = messages.firstOrNull { it.id == quick.getOrNull(idx) }
+                                val accent = if (m == null || !m.isText) Color.White else rgb(m.style.color)
+                                Tile(active == key, accent, m != null, { vm.toggleQuick(idx) }, Modifier.weight(1f)) {
+                                    MessageFace(m, Modifier.fillMaxSize().padding(4.dp), fontSize = 15)
+                                    if (m != null) TargetDot(m.target, Modifier.align(Alignment.TopEnd).padding(8.dp))
+                                }
+                            }
                         }
                     }
                 }
             }
+            // Set buttons
+            val curSet = pager.currentPage % QUICK_SETS
+            Row(Modifier.height(tileH), horizontalArrangement = Arrangement.spacedBy(gap)) {
+                (0 until QUICK_SETS).forEach { s ->
+                    val sel = s == curSet
+                    Tile(sel, Color.White, true, {
+                        var d = s - curSet
+                        if (d > QUICK_SETS / 2) d -= QUICK_SETS
+                        if (d < -QUICK_SETS / 2) d += QUICK_SETS
+                        scope.launch { pager.animateScrollToPage(pager.currentPage + d) }
+                    }, Modifier.weight(1f)) {
+                        Text(setName(s), color = if (sel) Color.White else Color.Gray, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        }
         }
 
         Row(

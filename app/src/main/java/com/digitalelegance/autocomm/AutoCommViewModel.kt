@@ -57,11 +57,42 @@ class AutoCommViewModel(app: Application) : AndroidViewModel(app) {
     val log: StateFlow<String> = _log.asStateFlow()
 
     private val amber = TextStyle(color = 0xFFB000, effect = Effect.HOLD)
+    /** Fixed top row (not editable): Left, U-Turn, Hazard, Right. Animations are bundled GIFs in assets/. */
     val directions = listOf(
         Message("dir0", "LEFT", MsgKind.TEXT, Target.BOTH, "LEFT", amber),
         Message("dir1", "U-TURN", MsgKind.TEXT, Target.BOTH, "U-TURN", amber),
+        Message("dir3", "HAZARD", MsgKind.TEXT, Target.BOTH, "HAZARD", TextStyle(color = 0xFF0000, effect = Effect.BLINK)),
         Message("dir2", "RIGHT", MsgKind.TEXT, Target.BOTH, "RIGHT", amber),
     )
+
+    private val signalAssets = mapOf(
+        "dir0" to "signal_left.gif",
+        "dir1" to "signal_uturn.gif",
+        "dir2" to "signal_right.gif",
+        "dir3" to "signal_hazard.gif",
+    )
+
+    private val assetCache = mutableMapOf<String, Frames?>()
+
+    /** Decode a bundled GIF (assets/) into frames; near-black = off. Cached. */
+    private fun assetFrames(name: String): Frames? = synchronized(assetCache) {
+        assetCache.getOrPut(name) {
+            runCatching {
+                val bytes = getApplication<Application>().assets.open(name).use { it.readBytes() }
+                val px = ArrayList<IntArray>()
+                val d = ArrayList<Int>()
+                val info = GifDecoder.decode(bytes, 1000) { canvas, delay ->
+                    px += IntArray(canvas.size) { i ->
+                        val c = canvas[i]
+                        val dark = (c shr 16 and 0xFF) < 8 && (c shr 8 and 0xFF) < 8 && (c and 0xFF) < 8
+                        if (c ushr 24 == 0 || dark) 0 else c or (0xFF shl 24)
+                    }
+                    d += delay
+                }
+                info?.let { Frames(it.first, it.second, px, d) }
+            }.getOrNull()
+        }
+    }
 
     private val defaultQuick = listOf(
         "THANK YOU" to TextStyle(color = 0x00FF40),
@@ -119,6 +150,7 @@ class AutoCommViewModel(app: Application) : AndroidViewModel(app) {
             val a = JSONArray(prefs.getString("quick_v3", "[]"))
             (0 until a.length()).map { a.optString(it).ifEmpty { null } }
         }.getOrDefault(emptyList()).let { (it + List(QUICK_SLOTS) { null }).take(QUICK_SLOTS) }
+        addThankYou()
         _stickers.value = listOf("front", "rear").associateWith { role ->
             prefs.getString("stickers_v4_$role", null)?.let { raw ->
                 runCatching {
@@ -165,6 +197,23 @@ class AutoCommViewModel(app: Application) : AndroidViewModel(app) {
         edit.putBoolean("v3", true).apply()
     }
 
+    /** One-time: add the bundled "Thank You" animation and put it where the THANK YOU text was. */
+    private fun addThankYou() {
+        if (prefs.getBoolean("thankyou_v5", false)) return
+        val f = assetFrames("thank_you.gif") ?: return
+        val m = Message(
+            newId(), "Thank You", MsgKind.ANIMATION, Target.BOTH,
+            style = TextStyle(effect = Effect.HOLD), w = f.w, h = f.h, frames = f.pixels, delays = f.delays,
+        )
+        store.save(m)
+        _messages.update { it + m }
+        val q = _quick.value.toMutableList()
+        val old = q.indexOfFirst { id -> message(id)?.let { it.isText && it.text.trim().equals("THANK YOU", ignoreCase = true) } == true }
+        val slot = if (old >= 0) old else q.indexOfFirst { it == null }
+        if (slot >= 0) { q[slot] = m.id; saveQuick(q) }
+        prefs.edit().putBoolean("thankyou_v5", true).apply()
+    }
+
     private fun saveQuick(list: List<String?>) {
         val l = (list + List(QUICK_SLOTS) { null }).take(QUICK_SLOTS)
         prefs.edit().putString("quick_v3", JSONArray().apply { l.forEach { put(it ?: "") } }.toString()).apply()
@@ -174,15 +223,28 @@ class AutoCommViewModel(app: Application) : AndroidViewModel(app) {
     fun setQuick(index: Int, id: String?) = saveQuick(_quick.value.toMutableList().also { it[index] = id })
 
     fun moveQuick(from: Int, to: Int) {
-        if (to !in 0 until QUICK_SLOTS) return
+        if (to !in 0 until QUICK_SLOTS || from / SET_SLOTS != to / SET_SLOTS) return // stay within the set
         saveQuick(_quick.value.toMutableList().also { val t = it[from]; it[from] = it[to]; it[to] = t })
         _active.value = null
     }
 
-    /** Remove from quick responses (not from saved); everything below moves up. */
+    /** Remove from quick responses (not from saved); everything below it in the same set moves up. */
     fun removeQuick(index: Int) {
-        saveQuick(_quick.value.toMutableList().also { it.removeAt(index); it.add(null) })
+        val l = _quick.value.toMutableList()
+        val end = index / SET_SLOTS * SET_SLOTS + SET_SLOTS - 1
+        for (i in index until end) l[i] = l[i + 1]
+        l[end] = null
+        saveQuick(l)
         _active.value = null
+    }
+
+    /** Remove every use of [id], closing gaps within each set. */
+    private fun dropFromQuick(id: String) {
+        val l = _quick.value
+        saveQuick((0 until QUICK_SETS).flatMap { s ->
+            val set = l.subList(s * SET_SLOTS, (s + 1) * SET_SLOTS).filterNot { it == id }
+            set + List(SET_SLOTS - set.size) { null }
+        })
     }
 
     private fun saveStickers(role: String, list: List<StickerItem>) {
@@ -250,7 +312,7 @@ class AutoCommViewModel(app: Application) : AndroidViewModel(app) {
     fun deleteMessage(id: String) {
         store.delete(id)
         _messages.update { l -> l.filterNot { it.id == id } }
-        saveQuick(_quick.value.filterNot { it == id })
+        dropFromQuick(id)
         _stickers.value.forEach { (role, list) -> if (list.any { it.id == id }) saveStickers(role, list.filterNot { it.id == id }) }
     }
 
@@ -361,6 +423,7 @@ class AutoCommViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Render a message at a given panel size. */
     fun framesFor(m: Message, w: Int, h: Int): Frames {
+        signalAssets[m.id]?.let { a -> assetFrames(a)?.let { return it.fitTo(w, h).brightness(m.style.brightness) } }
         when (m.id) {
             "dir0" -> return TextFx.arrow(TextFx.Arrow.LEFT, m.style, w, h)
             "dir1" -> return TextFx.arrow(TextFx.Arrow.UTURN, m.style, w, h)

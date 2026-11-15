@@ -111,5 +111,8 @@ class Message(
     ) = Message(id, name, kind, target, text, style, w, h, frames, delays)
 }
 
-const val QUICK_SLOTS = 12
-const val MAX_ANIM_FRAMES = 40
+const val QUICK_SETS = 4
+const val SET_SLOTS = 12
+const val QUICK_SLOTS = QUICK_SETS * SET_SLOTS // 48, stored flat: index = set * SET_SLOTS + slot
+
+fun setName(set: Int) = if (set == 0) "Set ★" else "Set ${set + 1}"

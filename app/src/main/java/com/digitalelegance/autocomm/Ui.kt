@@ -339,7 +339,9 @@ fun MessageFace(m: Message?, modifier: Modifier = Modifier, fontSize: Int = 18) 
         when {
             m == null -> Text("?", color = Line, fontSize = fontSize.sp, fontWeight = FontWeight.Bold)
             !m.isText && m.frames.isNotEmpty() -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                PixelImage(m.frames.first(), m.w, m.h, Modifier.fillMaxWidth(0.9f).aspectRatio(m.w / m.h.toFloat()))
+                // thumbnail = the fullest frame (first frames of animations are often blank)
+                val thumb = remember(m) { m.frames.maxByOrNull { f -> f.count { it ushr 24 != 0 } } ?: m.frames.first() }
+                PixelImage(thumb, m.w, m.h, Modifier.fillMaxWidth(0.9f).aspectRatio(m.w / m.h.toFloat()))
                 Text(m.name, color = Color.Gray, fontSize = 12.sp, maxLines = 1)
             }
             else -> Text(
